@@ -12,7 +12,7 @@ module MainLang where
     |  Pi CTerm CTerm     -- (PI) dependent function space
     |  Bound  Int         -- Bound variables of type Int because it's represented by de Bruijn indices
     |  Free   Name        -- Free variables of type name (see below)
-    |  ITerm :@: CTerm    -- the infix constructor :@: denotes application
+    |  App ITerm CTerm    -- application
     |  Nat                -- Nat data type
     |  Zero               -- data constructor of Nat
     |  Succ CTerm         -- data constructor of Nat
@@ -85,18 +85,18 @@ module MainLang where
     | VEq Value Value Value
 
   showVal :: Value -> String
-  showVal (VLam _)         = "lambda"
-  showVal (VStar)          = "*"
+  showVal (VLam _)         = "\\ "
+  showVal VStar          = "* "
   showVal (VPi v _f)       = "pi " ++ showVal v ++ " -> lambda"
   showVal (VNeutral _n)    = "neutral "
-  showVal (VNat)           = "Nat "
-  showVal (VZero)          = "Z "
+  showVal VNat           = "Nat "
+  showVal VZero          = "Z "
   showVal (VSucc v)        = "(S " ++ " " ++ showVal v ++ ")"
   showVal (VNil t)         = "Vec " ++ showVal t ++ " 0"
-  showVal (VCons a k x xs) = "Cons " ++ foldl (++) [] (map showVal [a, k, x, xs])
+  showVal (VCons a k x xs) = "Cons " ++ concatMap showVal [a, k, x, xs]
   showVal (VVec t l)       = "Vec " ++ showVal t ++ " Length " ++ showVal l
   showVal (VRefl x y)      = "Refl " ++ showVal x ++ showVal y
-  showVal (VEq a x y)      = "Eq " ++ foldl (++) [] (map showVal [a, x, y])
+  showVal (VEq a x y)      = "Eq " ++ concatMap showVal [a, x, y]
 
   --A neutral term is either a variable or an application of a neutral term to a value
   data Neutral
@@ -120,7 +120,7 @@ module MainLang where
   iEval (Ann  e _)    d  =  cEval e d
   iEval (Free  x)    _d  =  vfree x
   iEval (Bound  ii)   d  =  d !! ii --(!!) :: [a] -> Int -> a. It's the list lookup operator.
-  iEval (e1 :@: e2)   d  =  vapp (iEval e1 d) (cEval e2 d)
+  iEval (App e1 e2)   d  =  vapp (iEval e1 d) (cEval e2 d)
   iEval Star         _d  =  VStar
   iEval (Pi ty ty')   d  =  VPi (cEval ty d)(\ x -> cEval ty' (x : d))
   --evaluation of Nat
@@ -187,7 +187,7 @@ module MainLang where
   iSubst ii r (Ann e ty)     =  Ann (cSubst ii r e) (cSubst ii r ty)
   iSubst ii r (Bound j)      =  if ii == j then r else Bound j
   iSubst _ii _r (Free y)     =  Free y
-  iSubst ii r (e1 :@: e2)    =  iSubst ii r e1 :@: cSubst ii r e2
+  iSubst ii r (App e1 e2)    =  App (iSubst ii r e1) (cSubst ii r e2)
   iSubst _ii _r Star         =  Star
   iSubst ii r (Pi ty ty')    =  Pi  (cSubst ii r ty) (cSubst (ii + 1) r ty')
   --for Nat
@@ -245,7 +245,7 @@ module MainLang where
 
   neutralQuote :: Int -> Neutral -> ITerm
   neutralQuote ii (NFree x)   =  boundfree ii x
-  neutralQuote ii (NApp n v)  =  neutralQuote ii n :@: quote ii v
+  neutralQuote ii (NApp n v)  =  App (neutralQuote ii n) (quote ii v)
   neutralQuote ii (NNatElim m z s n)
     =  NatElim (quote ii m) (quote ii z) (quote ii s) (Inf (neutralQuote ii n))
   neutralQuote ii (NVecElim a m mn mc n xs)
@@ -289,7 +289,7 @@ module MainLang where
           Nothing ->
             throwError ("Cannot find the type of \n" ++ show x ++
             "\n (binder number " ++show ii++ ") in the environment.")
-  iType ii g (e1 :@: e2)
+  iType ii g (App e1 e2)
     = do si <- iType ii g e1
          case si of
            VPi ty ty'  ->  do cType ii g e2 ty
@@ -333,15 +333,14 @@ module MainLang where
     do  cType ii g a VStar
         let aVal = cEval a []
         cType ii g m
-          (  VPi VNat (\k_ -> VPi (VVec aVal k_) (\ _ -> VStar)))
+          (  VPi VNat (\k_ -> VPi (VVec aVal k_) (const VStar)))
         let mVal = cEval m []
         cType ii g mn (foldl vapp mVal [VZero, VNil aVal])
         cType ii g mc
           (  VPi VNat (\ l ->
             VPi aVal (\ y ->
             VPi (VVec aVal l) (\ ys ->
-            VPi (foldl vapp mVal [l, ys]) (\ _ ->
-            (foldl vapp mVal [VSucc l, VCons aVal l y ys]))))))
+            VPi (foldl vapp mVal [l, ys]) (\ _ -> foldl vapp mVal [VSucc l, VCons aVal l y ys])))))
         cType ii g k VNat
         let kVal = cEval k []
         cType ii g vs (VVec aVal kVal)
@@ -366,7 +365,7 @@ module MainLang where
         cType ii g m
           (VPi aVal (\ x_ ->
           VPi aVal (\ y_ ->
-          VPi (VEq aVal x_ y_) (\ _ -> VStar))))
+          VPi (VEq aVal x_ y_) (const VStar))))
         let mVal = cEval m []
         cType ii g mr
           (VPi aVal (\ x_ ->
@@ -386,7 +385,7 @@ module MainLang where
     "Type mismatched. \n" ++ show iterm ++ " \n (binder number " ++show binder++ ") is of type \n" ++ show (showVal gotT) ++
     "\n but the expected type is " ++ show (showVal expectedT) ++ "."
 
-  --checkable terms takes a type as input and returns ().
+  --checker for checkable terms checks the term against a type and returns ().
   cType :: Int -> Context -> CTerm -> Type -> Result ()
   cType ii g (Inf e) v
     =  do v' <- iType ii g e
@@ -410,7 +409,7 @@ module MainLang where
     motivePlus -- motive
     (Lam (cBound 0)) --(\n -> n)
     --(\k \rec \n -> Succ(rec n)), where rec is adding k
-    (Lam (Lam (Lam (cSucc (Inf ((Bound 1) :@: (cBound 0)))))))
+    (Lam (Lam (Lam (cSucc (Inf (App (Bound 1) (cBound 0)))))))
   --plusZero adds zero to a Nat. plusZero :: Nat -> Nat.
   plusZero :: ITerm
   plusZero = plus cZero
@@ -436,44 +435,46 @@ module MainLang where
   --the motive of the EqElim for plusZeroIsIdentityInductive
   plusZeroIsIdentityIM :: CTerm
   plusZeroIsIdentityIM =
-    (Lam --x::Nat, in this case plus x 0
+    Lam --x::Nat, in this case plus x 0
       (Lam --y::Nat, in this case x
         (Lam --of type Eq a x y
           --output has to be of type type,
           --in this case Eq Nat (plus (Succ x) 0) (Succ x)
           (cEq cNat
-              (Inf (plusZero :@: (cSucc (cBound 1))))
+              (Inf (App plusZero (cSucc (cBound 1))))
               (cSucc (cBound 1))
           )
         )
       )
-    )
 
   --The function to prove inductive case of plusZeroIsIdentity.
   --plusZeroIsIdentityInductive ::
   --For all k::Nat.Eq Nat (plusZero k) k -> Eq Nat (plusZero (Succ k)) (Succ k)
   plusZeroIsIdentityInductive :: CTerm
   plusZeroIsIdentityInductive =
-    (Lam  --k :: Nat
-      (Lam (cEqElim
-        --1st argument: of type type, in this case Nat.
-        (cBound 0)
-        --2nd argument: motive, takes in x, y, Eq a x y and returns a type,
-        --in this case it's Eq Nat (plusZero (Succ k)) (Succ k)
-        plusZeroIsIdentityIM
-        --3rd argument, resulting type should be Eq Nat (plusZero (Succ k)) (Succ k).
-        (Lam (cRefl cNat (cSucc (cBound 0))))
-        --4th argument, x, of type Nat
-        (Inf (plusZero :@: (cBound 1)))
-        --5th argument, y, of type Nat
-        (cBound 1)
-        --6th argument, of type Eq a x y
-        (cRefl cNat (cBound 1)))))
+    Lam  --k :: Nat
+      (Lam 
+        (cEqElim
+          --1st argument: of type type, in this case Nat.
+          (cBound 0)
+          --2nd argument: motive, takes in x, y, Eq a x y and returns a type,
+          --in this case it's Eq Nat (plusZero (Succ k)) (Succ k)
+          plusZeroIsIdentityIM
+          --3rd argument, resulting type should be Eq Nat (plusZero (Succ k)) (Succ k).
+          (Lam (cRefl cNat (cSucc (cBound 0))))
+          --4th argument, x, of type Nat
+          (Inf (App plusZero (cBound 1)))
+          --5th argument, y, of type Nat
+          (cBound 1)
+          --6th argument, of type Eq a x y
+          (cRefl cNat (cBound 1))
+        )
+      )
 
   plusZeroIsIdentity :: CTerm -> ITerm
   plusZeroIsIdentity = NatElim --point-free style, x is omitted
     --motive takes in x and returns the type Eq Nat (x+0) x, \x. Eq Nat (x + 0) x
-    (Lam (cEq cNat (Inf (plusZero :@: (cBound 0))) (cBound 0)))
+    (Lam (cEq cNat (Inf (App plusZero (cBound 0))) (cBound 0)))
     (cRefl cNat cZero) --m Zero, with type Eq Nat 0 0.
     --inductive case, the result have to be of type Eq Nat (k + 1 + 0) (k + 1)
     plusZeroIsIdentityInductive
@@ -483,21 +484,20 @@ module MainLang where
   --the motive of the EqElim for plusCommInductive
   plusCommIM :: CTerm
   plusCommIM =
-    (Lam
+    Lam
       (Lam
         (Lam
           (cEq cNat
-              (Inf (plus (cSucc (cBound 2)) :@: (cBound 1)))
-              (Inf ((plus (cBound 1)) :@: (cSucc (cBound 2))))
+              (Inf (App (plus (cSucc (cBound 2))) (cBound 1)))
+              (Inf (App (plus (cBound 1)) (cSucc (cBound 2))))
           )
         )
       )
-    )
   --The function to prove inductive case of plusComm.
   --plusComm :: For all k,x::Nat, Eq Nat (plus k x) (plus x k) -> Eq Nat (plus (Succ k) x) (plus x (Succ k))
   plusCommInductive :: CTerm
   plusCommInductive =
-    (Lam --k::Nat
+    Lam --k::Nat
       (Lam --x::Nat
         (Lam
           (cEqElim
@@ -509,21 +509,19 @@ module MainLang where
             --3rd argument, resulting type should be Eq Nat (plus (Succ k) x) (plus x (Succ k)).
             (Lam (cRefl cNat (cSucc (cBound 2))))
             --4th argument, x, of type Nat
-            (Inf ((plus (cBound 2)) :@: (cBound 1)))
+            (Inf (App (plus (cBound 2)) (cBound 1)))
             --5th argument, y, of type Nat
-            (Inf (plus (cBound 1) :@: (cBound 2)))
+            (Inf (App (plus (cBound 1)) (cBound 2)))
             --6th argument, of type Eq a x y
-            (cRefl cNat (Inf ((plus (cBound 1)) :@: (cBound 2))))
+            (cRefl cNat (Inf (App (plus (cBound 1)) (cBound 2))))
           )
         )
       )
-    )
 
   plusComm :: CTerm -> CTerm -> ITerm
-  plusComm _x y = NatElim
+  plusComm _x = NatElim
     --motive takes in x and y and returns the type Eq Nat (plus x y) (plus y x)
-    (Lam (Lam (cEq cNat (Inf (plus (cBound 1) :@: (cBound 0))) (Inf ((plus (cBound 0)) :@: (cBound 1))))))
-    (cRefl cNat (Inf (plusZero :@: (cBound 1)))) --m Zero, x + 0 = 0 + x
+    (Lam (Lam (cEq cNat (Inf (App (plus (cBound 1)) (cBound 0))) (Inf (App (plus (cBound 0)) (cBound 1))))))
+    (cRefl cNat (Inf (App plusZero (cBound 1)))) --m Zero, x + 0 = 0 + x
     --inductive case, the result have to be of type Eq Nat (x + (k+1)) ((k+1) + x)
     plusCommInductive
-    y
